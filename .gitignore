@@ -1,0 +1,45 @@
+# Node modules
+node_modules/
+package-lock.json
+
+# Environment variables
+.env
+
+# Python cache
+__pycache__/
+
+# Datasets / MRI / Model directories
+ds000212/
+asd_fmri/
+ai_model/
+uploads/
+
+# Machine learning model + training files
+*.pkl
+*.h5
+*.pt
+*.joblib
+*.pytorch
+*.tflite
+*.keras
+*.ckpt
+
+# Large data + logs + training outputs
+*.csv
+*.log
+*.txt
+train_output.txt
+train_out.txt
+
+# Reports & HTML artifacts
+*.html
+
+# Images and media (optional – remove if you want to track UI images)
+*.nii
+*.gz
+
+# IDE / OS configs
+.vscode/
+credentials/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,15 @@
+{
+  "type": "BPNN",
+  "input_features": [
+    "week",
+    "communication",
+    "social_skills",
+    "behavior_control",
+    "attention_span",
+    "sensory_response"
+  ],
+  "output": "avg_progress_score",
+  "mse": 4.589443083875085,
+  "r2_score": 0.720326442177021,
+  "epochs_trained": 100
+}
