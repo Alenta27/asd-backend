@@ -2,10 +2,10 @@ services:
   - type: web
     name: asd-backend
     runtime: node
-    buildCommand: npm install && python3.11 -m pip install -r requirements.txt
+    buildCommand: npm install
     startCommand: npm start
     envVars:
-      - key: PYTHON_BIN
-        value: python3.11
       - key: NODE_VERSION
         value: 22.22.0
+      - key: PYTHON_BIN
+        value: python3
