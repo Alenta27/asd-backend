@@ -2,6 +2,7 @@ services:
   - type: web
     name: asd-backend
     runtime: node
+    rootDirectory: .
     buildCommand: npm ci || npm install
     startCommand: node index.js
     healthCheckPath: /
