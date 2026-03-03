@@ -2,8 +2,9 @@ services:
   - type: web
     name: asd-backend
     runtime: node
-    rootDirectory: .
-    buildCommand: npm ci --production=false || npm install
+    buildCommand: |
+      npm ci --production=false || npm install
+      pip install -r requirements.txt
     startCommand: node index.js
     healthCheckPath: /
     envVars:
@@ -11,5 +12,3 @@ services:
         value: 22.22.0
       - key: PYTHON_BIN
         value: python3
-      - key: NPM_CONFIG_LOGLEVEL
-        value: verbose
