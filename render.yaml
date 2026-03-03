@@ -2,9 +2,7 @@ services:
   - type: web
     name: asd-backend
     runtime: node
-    buildCommand: |
-      npm ci --production=false || npm install
-      pip install -r requirements.txt
+    buildCommand: npm ci --production=false && pip install -r requirements.txt
     startCommand: node index.js
     healthCheckPath: /
     envVars:

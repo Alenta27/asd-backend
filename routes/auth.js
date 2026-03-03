@@ -19,7 +19,8 @@ const TeacherSettings = require("../models/teacherSettings");
 const Meeting = require("../models/meeting");
 const Report = require("../models/report");
 
-const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID || "3074679378-fbmg47osjqajq7u4cv0qja7svo00pv3m.apps.googleusercontent.com");
+const googleClientId = (process.env.GOOGLE_CLIENT_ID || "3074679378-fbmg47osjqajq7u4cv0qja7svo00pv3m.apps.googleusercontent.com").trim();
+const googleClient = new OAuth2Client(googleClientId);
 
 const credentialsDir = path.join(__dirname, '../credentials');
 if (!fs.existsSync(credentialsDir)) {
@@ -122,181 +123,145 @@ router.post('/api/register', uploadCredentials.single('doctoraldegree'), async (
     }
 })
 
-// --- NEW ENDPOINT: To set a user's role after they sign up ---
-router.put('/api/user/role', async (req, res) => {
-    // We get the userId from the token to make this secure
-    const { token, role } = req.body;
-    if (!token || !role) {
-        return res.status(400).json({ message: 'Token and role are required.' });
-    }
-    try {
-        const decoded = jwt.verify(token, process.env.JWT_SECRET || "your-super-secret-jwt-key-change-this-in-production");
-        const userId = decoded.id;
-
-        // Build update object with role and corresponding unique ID
-        const updateData = { role };
-        
-        if (role === 'parent' && !await User.findById(userId).select('parentId').then(u => u?.parentId)) {
-            updateData.parentId = generateUniqueId('parent');
-        } else if (role === 'therapist' && !await User.findById(userId).select('therapistId').then(u => u?.therapistId)) {
-            updateData.therapistId = generateUniqueId('therapist');
-        } else if (role === 'teacher' && !await User.findById(userId).select('teacherId').then(u => u?.teacherId)) {
-            updateData.teacherId = generateUniqueId('teacher');
-        } else if (role === 'researcher' && !await User.findById(userId).select('researcherId').then(u => u?.researcherId)) {
-            updateData.researcherId = generateUniqueId('researcher');
-        } else if (role === 'admin' && !await User.findById(userId).select('adminId').then(u => u?.adminId)) {
-            updateData.adminId = generateUniqueId('admin');
-        }
-
-        const user = await User.findByIdAndUpdate(userId, updateData, { new: true });
-        if (!user) {
-            return res.status(404).json({ message: 'User not found.' });
-        }
-        // Generate a new token with the updated role
-        const newToken = jwt.sign(
-            { id: user._id, email: user.email, role: user.role },
-            process.env.JWT_SECRET || "your-super-secret-jwt-key-change-this-in-production",
-            { expiresIn: "1h" }
-        );
-        res.json({ 
-            message: "Role updated successfully", 
-            token: newToken,
-            user: {
-                id: user._id,
-                email: user.email,
-                role: user.role,
-                parentId: user.parentId,
-                therapistId: user.therapistId,
-                teacherId: user.teacherId,
-                researcherId: user.researcherId,
-                adminId: user.adminId
-            }
-        });
-    } catch (err) {
-        res.status(500).json({ message: "Server error", error: err.message });
-    }
-});
-
 // ---------------- Google Authentication Route (Updated) ----------------
 router.post('/api/auth/google', async (req, res) => {
-    const { token } = req.body;
-    console.log('=== Google Auth Request ===');
-    console.log('Received Google token:', token ? 'Token received' : 'No token');
-    console.log('Token length:', token ? token.length : 0);
-    console.log('Token preview:', token ? token.substring(0, 50) + '...' : 'No token');
-    console.log('Google Client ID being used:', process.env.GOOGLE_CLIENT_ID || 'NOT SET');
+  const { token, expectedRole } = req.body;
+  console.log('=== Google Auth Request ===');
+  console.log('Received Google token:', token ? 'Token received' : 'No token');
+  console.log('Token length:', token ? token.length : 0);
+  console.log('Google Client ID being used:', googleClientId);
+  const validRoles = ['parent', 'therapist', 'teacher', 'researcher', 'admin'];
     
-    if (!token) {
-        return res.status(400).json({ message: "No token provided" });
+  if (!token) {
+    return res.status(400).json({ message: "No token provided" });
+  }
+    
+  try {
+    // Verify Google token
+    console.log('Attempting to verify Google token...');
+    const ticket = await googleClient.verifyIdToken({
+      idToken: token,
+      audience: googleClientId
+    });
+    const payload = ticket.getPayload();
+    console.log('Token payload received for:', payload.email);
+        
+    // Verify audience from payload (robust check)
+    const aud = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
+    if (!aud.includes(googleClientId)) {
+      console.error('❌ AUDIENCE MISMATCH:');
+      console.error('Expected:', googleClientId);
+      console.error('Got:', payload.aud);
+      throw new Error(`Invalid audience: expected ${googleClientId}, got ${payload.aud}`);
     }
-    
+        
+    console.log('✅ Google token verified successfully for:', payload.email);
+    const { email, name } = payload;
+    const normalizedEmail = email.toLowerCase();
+
+    let user = null;
+    let isNewUser = false;
+        
     try {
-        // Verify Google token
-        console.log('Attempting to verify Google token...');
-        const ticket = await googleClient.verifyIdToken({
-            idToken: token
-        });
-        const payload = ticket.getPayload();
-        
-        // Manual audience verification
-        const expectedAudience = process.env.GOOGLE_CLIENT_ID || "3074679378-fbmg47osjqajq7u4cv0qja7svo00pv3m.apps.googleusercontent.com";
-        if (payload.aud !== expectedAudience) {
-            console.error('❌ AUDIENCE MISMATCH:');
-            console.error('Expected:', expectedAudience);
-            console.error('Got:', payload.aud);
-            throw new Error(`Invalid audience: expected ${expectedAudience}, got ${payload.aud}`);
+      // Find user by email (case-insensitive)
+      user = await User.findOne({ email: normalizedEmail }).maxTimeMS(5000);
+            
+      if (!user) {
+        // Fallback: try case-insensitive search for existing users
+        user = await User.findOne({ email: { $regex: `^${normalizedEmail}$`, $options: 'i' } }).maxTimeMS(5000);
+      }
+      if (user) {
+        console.log(`✅ Found existing user: ${user.email}, Role: ${user.role}`);
+        // Check if user has a valid role, if not, treat as new user needing role selection
+        if (!user.role || !validRoles.includes(user.role)) {
+          console.log(`⚠️ User ${user.email} has invalid/undefined role (${user.role}), treating as new user`);
+          isNewUser = true;
+        } else {
+          console.log(`✅ User has valid role: ${user.role}, isNewUser: false`);
+          isNewUser = false;
         }
-        
-        console.log('✅ Google token verified successfully for:', payload.email);
-        const { email, name } = payload;
-        const normalizedEmail = email.toLowerCase();
-
-        let user = null;
-        let isNewUser = false;
-        
-        try {
-            user = await User.findOne({ email: { $regex: `^${email}$`, $options: 'i' } }).maxTimeMS(5000);
-            if (user) {
-                console.log(`✅ Found existing user: ${user.email}, Role: ${user.role}`);
-                // Check if user has a valid role, if not, treat as new user needing role selection
-                const validRoles = ['parent', 'therapist', 'teacher', 'researcher', 'admin'];
-                if (!user.role || !validRoles.includes(user.role)) {
-                    console.log(`⚠️ User ${user.email} has invalid/undefined role (${user.role}), treating as new user`);
-                    isNewUser = true;
-                } else {
-                    console.log(`✅ User has valid role: ${user.role}, isNewUser: false`);
-                    isNewUser = false;
-                }
-            }
-            if (user && user.email !== normalizedEmail) {
-                user.email = normalizedEmail;
-                await user.save();
-            }
-            if (!user) {
-                isNewUser = true;
-                console.log(`⚠️ User not found in DB, creating new guest user: ${normalizedEmail}`);
-                user = new User({
-                    username: name || normalizedEmail,
-                    email: normalizedEmail,
-                    password: '',
-                    role: 'guest'
-                });
-                await user.save();
-                console.log(`✅ New guest user created: ${normalizedEmail}`);
-            }
-        } catch (dbErr) {
-            console.warn('⚠️ MongoDB unavailable, creating temporary user object:', dbErr.message);
-            // If DB is down, create a temporary user object for JWT generation
-            user = {
-                _id: `temp-${Date.now()}`,
-                email: normalizedEmail,
-                role: 'guest'
-            };
-            isNewUser = true;
-        }
-
-        const jwtToken = jwt.sign(
-            { id: user._id, email: user.email, role: user.role },
-            process.env.JWT_SECRET || "your-super-secret-jwt-key-change-this-in-production",
-            { expiresIn: "1h" }
-        );
-        
-        console.log('✅ JWT token generated successfully');
-        res.json({ 
-            message: "Google login successful", 
-            token: jwtToken, 
-            isNewUser,
-            user: {
-                id: user._id,
-                email: user.email,
-                role: user.role,
-                parentId: user.parentId,
-                therapistId: user.therapistId,
-                teacherId: user.teacherId,
-                researcherId: user.researcherId,
-                adminId: user.adminId
-            }
+      }
+      if (user && user.email !== normalizedEmail) {
+        user.email = normalizedEmail;
+        await user.save();
+      }
+      if (!user) {
+        isNewUser = true;
+        console.log(`⚠️ User not found in DB, creating new guest user: ${normalizedEmail}`);
+        user = new User({
+          username: name || normalizedEmail,
+          email: normalizedEmail,
+          password: '',
+          role: 'guest'
         });
-
-    } catch (err) {
-        console.error('❌ Google token verification failed:');
-        console.error('Error message:', err.message);
-        console.error('Error code:', err.code);
-        console.error('Full error:', err);
-        
-        // Additional diagnostics
-        if (err.message.includes('audience')) {
-            console.error('⚠️ AUDIENCE MISMATCH - Token from different Client ID');
-            console.error('Expected audience:', process.env.GOOGLE_CLIENT_ID || '3074679378-fbmg47osjqajq7u4cv0qja7svo00pv3m.apps.googleusercontent.com');
-        }
-        
-        res.status(401).json({ 
-            message: "Invalid Google token", 
-            error: err.message,
-            clientId: process.env.GOOGLE_CLIENT_ID || 'NOT SET',
-            hint: 'Ensure frontend and backend use the same Google Client ID'
-        });
+        await user.save();
+        console.log(`✅ New guest user created: ${normalizedEmail}`);
+      }
+    } catch (dbErr) {
+      console.warn('⚠️ MongoDB unavailable, creating temporary user object:', dbErr.message);
+      // If DB is down, create a temporary user object for JWT generation
+      user = {
+        _id: `temp-${Date.now()}`,
+        email: normalizedEmail,
+        role: 'guest'
+      };
+      isNewUser = true;
     }
+
+    // Enforce role consistency when the frontend supplied an expected role
+    const requestedRole = expectedRole ? String(expectedRole).toLowerCase() : null;
+    const actualRole = user?.role ? String(user.role).toLowerCase() : null;
+    if (!isNewUser && requestedRole && validRoles.includes(actualRole) && requestedRole !== actualRole) {
+      console.warn(`❌ Google role mismatch for ${normalizedEmail}: requested ${requestedRole}, account role ${actualRole}`);
+      return res.status(403).json({
+        message: `This Google account is registered as ${user.role}. Please sign in using the ${user.role} role.`,
+        expectedRole: requestedRole,
+        actualRole
+      });
+    }
+
+    const jwtToken = jwt.sign(
+      { id: user._id, email: user.email, role: user.role },
+      process.env.JWT_SECRET || "your-super-secret-jwt-key-change-this-in-production",
+      { expiresIn: "1h" }
+    );
+        
+    console.log('✅ JWT token generated successfully');
+    res.json({ 
+      message: "Google login successful", 
+      token: jwtToken, 
+      isNewUser,
+      user: {
+        id: user._id,
+        email: user.email,
+        role: user.role,
+        parentId: user.parentId,
+        therapistId: user.therapistId,
+        teacherId: user.teacherId,
+        researcherId: user.researcherId,
+        adminId: user.adminId
+      }
+    });
+
+  } catch (err) {
+    console.error('❌ Google token verification failed:');
+    console.error('Error message:', err.message);
+    console.error('Error code:', err.code);
+    console.error('Full error:', err);
+        
+    // Additional diagnostics
+    if (err.message.includes('audience')) {
+      console.error('⚠️ AUDIENCE MISMATCH - Token from different Client ID');
+      console.error('Expected audience:', googleClientId);
+    }
+        
+    res.status(401).json({ 
+      message: "Invalid Google token", 
+      error: err.message,
+      clientId: process.env.GOOGLE_CLIENT_ID || 'NOT SET',
+      hint: 'Ensure frontend and backend use the same Google Client ID'
+    });
+  }
 });
 
 router.post('/api/auth/forget-password', async (req, res) => {
@@ -527,12 +492,21 @@ router.get('/api/teacher/dashboard', verifyToken, async (req, res) => {
 
         const byRiskAgg = await Patient.aggregate([
           { $match: { assignedTeacherId: me._id } },
-          { $group: { _id: "$riskLevel", count: { $sum: 1 } } }
+          { $group: { _id: { $toLower: "$riskLevel" }, count: { $sum: 1 } } }
         ]);
-        const riskDistribution = ['Low','Moderate','High'].map(level => ({
-          name: level,
-          value: byRiskAgg.find(x => x._id === level)?.count || 0
-        }));
+        const riskDistribution = ['Low','Medium','High'].map(level => {
+          let count = 0;
+          if (level === 'Medium') {
+            count = byRiskAgg
+              .filter(x => (x._id || '').toLowerCase() === 'medium' || (x._id || '').toLowerCase() === 'moderate')
+              .reduce((acc, curr) => acc + curr.count, 0);
+          } else {
+            count = byRiskAgg
+              .filter(x => (x._id || '').toLowerCase() === level.toLowerCase())
+              .reduce((acc, curr) => acc + curr.count, 0);
+          }
+          return { name: level, value: count };
+        });
 
         // Constrain trends to August-October of current year
         const now = new Date();
@@ -576,12 +550,21 @@ router.get('/api/teacher/insights', verifyToken, async (req, res) => {
     const totalAssignedStudents = await Patient.countDocuments({ assignedTeacherId: me._id });
     const byRiskAgg = await Patient.aggregate([
       { $match: { assignedTeacherId: me._id } },
-      { $group: { _id: "$riskLevel", count: { $sum: 1 } } }
+      { $group: { _id: { $toLower: "$riskLevel" }, count: { $sum: 1 } } }
     ]);
-    const riskDistribution = ['Low','Moderate','High'].map(level => ({
-      name: level,
-      value: byRiskAgg.find(x => x._id === level)?.count || 0
-    }));
+    const riskDistribution = ['Low','Medium','High'].map(level => {
+      let count = 0;
+      if (level === 'Medium') {
+        count = byRiskAgg
+          .filter(x => (x._id || '').toLowerCase() === 'medium' || (x._id || '').toLowerCase() === 'moderate')
+          .reduce((acc, curr) => acc + curr.count, 0);
+      } else {
+        count = byRiskAgg
+          .filter(x => (x._id || '').toLowerCase() === level.toLowerCase())
+          .reduce((acc, curr) => acc + curr.count, 0);
+      }
+      return { name: level, value: count };
+    });
 
     // Constrain trends to August-October of current year
     const now = new Date();
@@ -686,7 +669,10 @@ router.get('/api/teacher/students-at-risk', verifyToken, async (req, res) => {
     if (!me) return res.status(404).json({ message: 'User not found' });
     if (me.role !== 'teacher') return res.status(403).json({ message: 'Forbidden' });
 
-    const results = await Patient.find({ assignedTeacherId: me._id, riskLevel: { $in: ['High', 'Moderate'] } })
+    const results = await Patient.find({ 
+      assignedTeacherId: me._id, 
+      riskLevel: { $regex: /^(high|medium|moderate)$/i } 
+    })
       .select('name age gender riskLevel createdAt')
       .sort({ riskLevel: -1, createdAt: -1 })
       .limit(20)

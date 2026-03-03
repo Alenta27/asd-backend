@@ -87,9 +87,9 @@ router.get('/screening-results', requireResourceAccess('analytics'), async (req,
         }
       },
       riskDistribution: {
-        low: patients.filter(p => p.riskLevel === 'low').length,
-        medium: patients.filter(p => p.riskLevel === 'medium').length,
-        high: patients.filter(p => p.riskLevel === 'high').length
+        low: patients.filter(p => (p.riskLevel || '').toLowerCase() === 'low').length,
+        medium: patients.filter(p => (p.riskLevel || '').toLowerCase() === 'medium').length,
+        high: patients.filter(p => (p.riskLevel || '').toLowerCase() === 'high').length
       }
     };
     
@@ -148,9 +148,9 @@ router.post('/data-explorer', requireResourceAccess('analytics'), async (req, re
         typical: filteredData.filter(p => p.diagnosis === 'Typical').length
       },
       riskDistribution: {
-        low: filteredData.filter(p => p.riskLevel === 'low').length,
-        medium: filteredData.filter(p => p.riskLevel === 'medium').length,
-        high: filteredData.filter(p => p.riskLevel === 'high').length
+        low: filteredData.filter(p => (p.riskLevel || '').toLowerCase() === 'low').length,
+        medium: filteredData.filter(p => (p.riskLevel || '').toLowerCase() === 'medium').length,
+        high: filteredData.filter(p => (p.riskLevel || '').toLowerCase() === 'high').length
       }
     };
     

@@ -16,6 +16,9 @@ const patientSchema = new mongoose.Schema({
     screeningStatus: { type: String, enum: ['pending', 'completed', 'in-progress'], default: 'pending' },
     reportStatus: { type: String, enum: ['pending', 'completed', 'in-review'], default: 'pending' },
     submittedDate: { type: Date, required: false },
+    preferredLanguage: { type: String, default: 'en-US' }, // For speech therapy
+    subscriptionStatus: { type: String, enum: ['active', 'expired', 'none'], default: 'none' },
+    subscriptionExpiry: { type: Date, required: false },
 }, { timestamps: true });
 
 const Patient = mongoose.model("Patient", patientSchema);

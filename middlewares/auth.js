@@ -167,6 +167,7 @@ function requireResourceAccess(resourceType) {
 
 module.exports = { 
   verifyToken, 
+  authenticateToken: verifyToken, // Alias for backward compatibility
   requireRole,
   adminCheck, 
   parentCheck,

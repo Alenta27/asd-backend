@@ -15,6 +15,14 @@ const userSchema = new mongoose.Schema({
     isActive: { type: Boolean, default: true },
     licenseNumber: { type: String, required: false },
     doctoraldegreeUrl: { type: String, required: false },
+    plan: { type: String, enum: ['FREE', 'PRO'], default: 'FREE' },
+    planExpiry: { type: Date, required: false },
+    trialUsed: { type: Boolean, default: false },
+    razorpayOrderId: { type: String, required: false },
+    razorpayPaymentId: { type: String, required: false },
+    childName: { type: String, required: false },
+    isSpeechOnly: { type: Boolean, default: false },
+    preferredLanguage: { type: String, default: 'en-US' },
     createdAt: { type: Date, default: Date.now },
 
 }, { timestamps: true });

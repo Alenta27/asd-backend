@@ -7,41 +7,78 @@ const Report = require('../models/report');
 const sendEmail = require('../utils/email');
 const { verifyToken, adminCheck } = require('../middlewares/auth');
 
+// GET /api/admin/metrics - Real database-driven dashboard metrics
+router.get('/metrics', async (req, res) => {
+  try {
+    const currentYear = new Date().getFullYear();
+    const currentMonth = new Date().getMonth();
+
+    // Count users with pending status (Pending Approvals)
+    const pendingCount = await User.countDocuments({
+      status: 'pending'
+    });
+
+    // Count all active users (Total Active Users)
+    const activeUserCount = await User.countDocuments({
+      isActive: true,
+      status: { $ne: 'rejected' }
+    });
+
+    // Get screenings for current month (Screenings This Month)
+    const firstDayOfMonth = new Date(currentYear, currentMonth, 1);
+    const firstDayOfNextMonth = new Date(currentYear, currentMonth + 1, 1);
+
+    const screeningsThisMonth = await Screening.countDocuments({
+      createdAt: {
+        $gte: firstDayOfMonth,
+        $lt: firstDayOfNextMonth
+      }
+    });
+
+    res.json({
+      success: true,
+      data: {
+        pendingApprovals: pendingCount,
+        totalActiveUsers: activeUserCount,
+        screeningsThisMonth: screeningsThisMonth
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching admin metrics:', error);
+    res.status(500).json({ 
+      success: false,
+      error: 'Failed to fetch admin metrics', 
+      details: error.message 
+    });
+  }
+});
+
+// Legacy endpoint for backward compatibility
 router.get('/stats', async (req, res) => {
   try {
     const currentYear = new Date().getFullYear();
     const currentMonth = new Date().getMonth();
 
-    let pendingCount, userCount, screeningCount;
+    // Count all users with pending status (not just therapists)
+    const pendingCount = await User.countDocuments({
+      status: 'pending'
+    });
 
-    try {
-      // Count all users with pending status (not just therapists)
-      pendingCount = await User.countDocuments({
-        status: 'pending'
-      });
+    // Count all active users
+    const userCount = await User.countDocuments({
+      isActive: true
+    });
 
-      // Count all active users
-      userCount = await User.countDocuments({
-        isActive: true
-      });
+    // Get screenings for current month
+    const firstDayOfMonth = new Date(currentYear, currentMonth, 1);
+    const firstDayOfNextMonth = new Date(currentYear, currentMonth + 1, 1);
 
-      // Get screenings for current month
-      const firstDayOfMonth = new Date(currentYear, currentMonth, 1);
-      const firstDayOfNextMonth = new Date(currentYear, currentMonth + 1, 1);
-
-      screeningCount = await Screening.countDocuments({
-        createdAt: {
-          $gte: firstDayOfMonth,
-          $lt: firstDayOfNextMonth
-        }
-      });
-    } catch (dbError) {
-      // If database is not available, return realistic mock data
-      console.log('Database not available, returning mock data');
-      pendingCount = 3; // 3 pending approvals
-      userCount = 127; // 127 active users
-      screeningCount = 45; // 45 screenings this month
-    }
+    const screeningCount = await Screening.countDocuments({
+      createdAt: {
+        $gte: firstDayOfMonth,
+        $lt: firstDayOfNextMonth
+      }
+    });
 
     res.json({
       pendingCount,
@@ -54,58 +91,78 @@ router.get('/stats', async (req, res) => {
   }
 });
 
-router.get('/screening-trends', verifyToken, adminCheck, async (req, res) => {
+// GET /api/admin/screening-trends - Month-wise screening trends (August to January)
+router.get('/screening-trends', async (req, res) => {
   try {
     const currentYear = new Date().getFullYear();
-    let screeningCounts;
+    
+    // Define month ranges (August to January)
+    const monthRanges = [
+      { month: 'August', start: new Date(currentYear, 7, 1), end: new Date(currentYear, 8, 1) },
+      { month: 'September', start: new Date(currentYear, 8, 1), end: new Date(currentYear, 9, 1) },
+      { month: 'October', start: new Date(currentYear, 9, 1), end: new Date(currentYear, 10, 1) },
+      { month: 'November', start: new Date(currentYear, 10, 1), end: new Date(currentYear, 11, 1) },
+      { month: 'December', start: new Date(currentYear, 11, 1), end: new Date(currentYear + 1, 0, 1) },
+      { month: 'January', start: new Date(currentYear + 1, 0, 1), end: new Date(currentYear + 1, 1, 1) }
+    ];
 
-    try {
-      const augustFirst = new Date(currentYear, 7, 1);
-      const novemberFirst = new Date(currentYear, 10, 1);
+    // Use MongoDB aggregation for efficient counting
+    const augustFirst = new Date(currentYear, 7, 1);
+    const februaryFirst = new Date(currentYear + 1, 1, 1);
 
-      const results = await Screening.aggregate([
-        {
-          $match: {
-            createdAt: {
-              $gte: augustFirst,
-              $lt: novemberFirst
-            }
+    const results = await Screening.aggregate([
+      {
+        $match: {
+          createdAt: {
+            $gte: augustFirst,
+            $lt: februaryFirst
           }
-        },
-        {
-          $group: {
-            _id: { $month: '$createdAt' },
-            count: { $sum: 1 }
-          }
-        },
-        {
-          $sort: { _id: 1 }
         }
-      ]);
-
-      screeningCounts = [0, 0, 0];
-
-      results.forEach(result => {
-        if (result._id === 8) {
-          screeningCounts[0] = result.count;
-        } else if (result._id === 9) {
-          screeningCounts[1] = result.count;
-        } else if (result._id === 10) {
-          screeningCounts[2] = result.count;
+      },
+      {
+        $group: {
+          _id: { 
+            year: { $year: '$createdAt' },
+            month: { $month: '$createdAt' }
+          },
+          count: { $sum: 1 }
         }
-      });
-    } catch (dbError) {
-      // If database is not available, return realistic mock data
-      console.log('Database not available, returning mock screening trends');
-      screeningCounts = [52, 61, 75];
-    }
+      },
+      {
+        $sort: { '_id.year': 1, '_id.month': 1 }
+      }
+    ]);
+
+    // Create a map for easy lookup
+    const countsMap = {};
+    results.forEach(result => {
+      const key = `${result._id.year}-${result._id.month}`;
+      countsMap[key] = result.count;
+    });
+
+    // Build the response with proper labels
+    const trendsData = monthRanges.map(range => {
+      const year = range.start.getFullYear();
+      const month = range.start.getMonth() + 1;
+      const key = `${year}-${month}`;
+      
+      return {
+        month: range.month,
+        screenings: countsMap[key] || 0
+      };
+    });
 
     res.json({
-      screeningCounts
+      success: true,
+      data: trendsData
     });
   } catch (error) {
     console.error('Error fetching screening trends:', error);
-    res.status(500).json({ error: 'Failed to fetch screening trends', details: error.message });
+    res.status(500).json({ 
+      success: false,
+      error: 'Failed to fetch screening trends', 
+      details: error.message 
+    });
   }
 });
 
@@ -202,11 +259,11 @@ router.get('/notifications', verifyToken, adminCheck, async (req, res) => {
     });
 
     const pendingScreenings = await Patient.countDocuments({
-      screeningStatus: 'pending'
+      screeningStatus: { $regex: /^pending$/i }
     });
 
     const pendingReports = await Patient.countDocuments({
-      reportStatus: 'pending'
+      reportStatus: { $regex: /^pending$/i }
     });
 
     res.json({
@@ -287,6 +344,95 @@ router.get('/recent-therapist-requests', verifyToken, adminCheck, async (req, re
   } catch (error) {
     console.error('Error fetching recent therapist requests:', error);
     res.status(500).json({ error: 'Failed to fetch requests', details: error.message });
+  }
+});
+
+// Get all active therapists
+router.get('/therapists', verifyToken, adminCheck, async (req, res) => {
+  try {
+    const therapists = await User.find({
+      role: 'therapist',
+      isActive: true,
+      status: 'approved'
+    })
+      .select('_id username firstName lastName email')
+      .sort({ username: 1 });
+
+    const formattedTherapists = therapists.map(t => ({
+      id: t._id,
+      name: `${t.firstName || ''} ${t.lastName || ''}`.trim() || t.username || t.email,
+      email: t.email
+    }));
+
+    res.json(formattedTherapists);
+  } catch (error) {
+    console.error('Error fetching therapists:', error);
+    res.status(500).json({ error: 'Failed to fetch therapists', details: error.message });
+  }
+});
+
+// Assign therapist to patient
+router.put('/children/:childId/assign-therapist', verifyToken, adminCheck, async (req, res) => {
+  try {
+    const { childId } = req.params;
+    const { therapistId } = req.body;
+
+    if (!therapistId) {
+      return res.status(400).json({ error: 'Therapist ID is required' });
+    }
+
+    const patient = await Patient.findById(childId);
+    if (!patient) {
+      return res.status(404).json({ error: 'Patient not found' });
+    }
+
+    const therapist = await User.findOne({
+      _id: therapistId,
+      role: 'therapist',
+      isActive: true,
+      status: 'approved'
+    });
+
+    if (!therapist) {
+      return res.status(404).json({ error: 'Therapist not found or inactive' });
+    }
+
+    patient.therapist_user_id = therapistId;
+    await patient.save();
+
+    const therapistName = `${therapist.firstName || ''} ${therapist.lastName || ''}`.trim() || therapist.username;
+    res.json({
+      success: true,
+      message: `Patient assigned to therapist ${therapistName}`,
+      patient
+    });
+  } catch (error) {
+    console.error('Error assigning therapist:', error);
+    res.status(500).json({ error: 'Failed to assign therapist', details: error.message });
+  }
+});
+
+// Unassign therapist from patient
+router.put('/children/:childId/unassign-therapist', verifyToken, adminCheck, async (req, res) => {
+  try {
+    const { childId } = req.params;
+
+    const patient = await Patient.findById(childId);
+    if (!patient) {
+      return res.status(404).json({ error: 'Patient not found' });
+    }
+
+    patient.therapist_user_id = null;
+    await patient.save();
+
+    res.json({
+      success: true,
+      message: 'Therapist unassigned from patient',
+      patient
+    });
+  } catch (error) {
+    console.error('Error unassigning therapist:', error);
+    res.status(500).json({ error: 'Failed to unassign therapist', details: error.message });
   }
 });
 

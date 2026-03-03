@@ -7,6 +7,26 @@ const Patient = require('../models/patient');
 const Report = require('../models/report');
 const Slot = require('../models/slot');
 const Appointment = require('../models/appointment');
+const GazeSession = require('../models/GazeSession');
+const DREAMFeatures = require('../models/dreamFeatures');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
+const { exec } = require('child_process');
+const csv = require('csv-parser');
+
+const upload = multer({ 
+  dest: 'uploads/dream_datasets/',
+  fileFilter: (req, file, cb) => {
+    if (path.extname(file.originalname).toLowerCase() === '.json' || 
+        file.mimetype === 'application/json' ||
+        path.extname(file.originalname).toLowerCase() === '.zip') {
+      cb(null, true);
+    } else {
+      cb(new Error('Only JSON or ZIP files are allowed'));
+    }
+  }
+});
 
 const formatAppointmentResponse = (appointment) => ({
   id: appointment._id,
@@ -43,6 +63,70 @@ router.get('/clients', requireResourceAccess('children'), async (req, res) => {
     res.json(clients);
   } catch (error) {
     res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Get specific patient details by ID
+router.get('/patient/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    // Find patient and verify it belongs to this therapist
+    const patient = await Patient.findOne({ 
+      _id: id, 
+      therapist_user_id: req.user.id 
+    });
+    
+    if (!patient) {
+      return res.status(404).json({ message: 'Patient not found or access denied' });
+    }
+    
+    res.json(patient);
+  } catch (error) {
+    console.error('Error fetching patient details:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// Get patient's screening history
+router.get('/patient/:id/screenings', async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    // Verify patient belongs to this therapist
+    const patient = await Patient.findOne({ 
+      _id: id, 
+      therapist_user_id: req.user.id 
+    });
+    
+    if (!patient) {
+      return res.status(404).json({ message: 'Patient not found or access denied' });
+    }
+    
+    // Fetch gaze sessions for this patient
+    const gazeSessions = await GazeSession.find({
+      patientId: id,
+      isGuest: false
+    })
+    .select('sessionType module status snapshots createdAt result')
+    .sort({ createdAt: -1 })
+    .limit(20);
+    
+    // Format screening data
+    const screenings = gazeSessions.map(session => ({
+      _id: session._id,
+      screeningType: 'gaze',
+      sessionType: session.sessionType || session.module,
+      status: session.status,
+      result: session.result,
+      snapshots: session.snapshots || [],
+      createdAt: session.createdAt
+    }));
+    
+    res.json(screenings);
+  } catch (error) {
+    console.error('Error fetching patient screenings:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
 
@@ -371,7 +455,18 @@ router.put('/calendar/availability', async (req, res) => {
   }
 });
 
-// Get billing information
+// Get gaze session details
+router.get('/sessions/:sessionId', async (req, res) => {
+  try {
+    const session = await GazeSession.findById(req.params.sessionId).populate('patientId', 'name age gender');
+    if (!session) return res.status(404).json({ message: 'Session not found' });
+    res.json(session);
+  } catch (error) {
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Update billing information
 router.get('/billing', async (req, res) => {
   try {
     const billing = {
@@ -641,7 +736,6 @@ router.get('/slots/available', async (req, res) => {
 // ============== PROGRESS TRACKING ROUTES ==============
 
 const { spawn } = require('child_process');
-const path = require('path');
 
 router.post('/predict-progress', async (req, res) => {
   try {
@@ -698,6 +792,655 @@ router.post('/predict-progress', async (req, res) => {
   } catch (error) {
     console.error('POST /predict-progress - Error:', error);
     res.status(500).json({ error: 'Server error', message: error.message });
+  }
+});
+
+router.post('/process-dream-dataset', upload.single('datasetFile'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    const uploadedFile = req.file.path;
+    const outputDir = path.join('uploads/dream_output', Date.now().toString());
+    const outputFile = path.join(outputDir, 'dream_features.csv');
+    
+    if (!fs.existsSync(outputDir)) {
+      fs.mkdirSync(outputDir, { recursive: true });
+    }
+
+    const pythonScript = path.join(__dirname, '../ai_model/process_data.py');
+    const inputDir = path.dirname(uploadedFile);
+    
+    const command = `python "${pythonScript}" "${inputDir}" "${outputFile}"`;
+    
+    console.log('[DREAM] Processing dataset:', req.file.originalname);
+    console.log('[DREAM] Command:', command);
+
+    exec(command, { maxBuffer: 10 * 1024 * 1024 }, async (error, stdout, stderr) => {
+      if (error) {
+        console.error('[DREAM] Processing error:', error);
+        console.error('[DREAM] Stderr:', stderr);
+        return res.status(500).json({ 
+          error: 'Dataset processing failed',
+          details: stderr 
+        });
+      }
+
+      try {
+        if (!fs.existsSync(outputFile)) {
+          return res.status(500).json({ error: 'Output file not generated' });
+        }
+
+        const batchId = `DREAM_${Date.now()}`;
+        const features = [];
+        const processedCount = { total: 0, success: 0, failed: 0 };
+
+        fs.createReadStream(outputFile)
+          .pipe(csv())
+          .on('data', (row) => {
+            features.push({
+              participantId: row.Participant_ID,
+              sessionDate: row.Session_Date,
+              averageJointVelocity: parseFloat(row.Average_Joint_Velocity) || 0,
+              totalDisplacementRatio: parseFloat(row.Total_Displacement_Ratio) || 0,
+              headGazeVariance: parseFloat(row.Head_Gaze_Variance) || 0,
+              eyeGazeConsistency: parseFloat(row.Eye_Gaze_Consistency) || 0,
+              adosCommunicationScore: parseInt(row.ADOS_Communication_Score) || 0,
+              adosTotalScore: parseInt(row.ADOS_Total_Score),
+              ageMonths: parseInt(row.Age_Months) || 0,
+              therapyCondition: row.Therapy_Condition,
+              filePath: row.File_Path,
+              uploadedBy: req.user.id,
+              batchId: batchId,
+              processedAt: new Date()
+            });
+            processedCount.total++;
+          })
+          .on('end', async () => {
+            try {
+              if (features.length > 0) {
+                const insertedDocs = await DREAMFeatures.insertMany(features);
+                processedCount.success = insertedDocs.length;
+              }
+
+              const summaryStats = {
+                avgVelocity: features.reduce((sum, f) => sum + f.averageJointVelocity, 0) / features.length || 0,
+                avgADOSScore: features.reduce((sum, f) => sum + f.adosTotalScore, 0) / features.length || 0,
+                adosRange: {
+                  min: Math.min(...features.map(f => f.adosTotalScore)),
+                  max: Math.max(...features.map(f => f.adosTotalScore))
+                }
+              };
+
+              console.log('[DREAM] Processing complete:', {
+                total: processedCount.total,
+                inserted: processedCount.success,
+                failed: processedCount.failed
+              });
+
+              res.json({
+                success: true,
+                message: 'Dataset processed successfully',
+                batchId: batchId,
+                processedCount: processedCount.success,
+                totalCount: processedCount.total,
+                summaryStats: summaryStats,
+                csvFile: outputFile
+              });
+
+              setTimeout(() => {
+                if (fs.existsSync(uploadedFile)) fs.unlinkSync(uploadedFile);
+              }, 5000);
+
+            } catch (dbErr) {
+              console.error('[DREAM] Database error:', dbErr);
+              res.status(500).json({ 
+                error: 'Failed to save to database',
+                details: dbErr.message 
+              });
+            }
+          })
+          .on('error', (err) => {
+            console.error('[DREAM] CSV parsing error:', err);
+            res.status(500).json({ 
+              error: 'Failed to parse output file',
+              details: err.message 
+            });
+          });
+
+      } catch (processErr) {
+        console.error('[DREAM] Error:', processErr);
+        res.status(500).json({ error: 'Processing error', details: processErr.message });
+      }
+    });
+
+  } catch (error) {
+    console.error('[DREAM] POST /process-dream-dataset - Error:', error);
+    res.status(500).json({ error: 'Server error', message: error.message });
+  }
+});
+
+router.get('/dream-features', async (req, res) => {
+  try {
+    const { batchId, participantId, limit = 100, skip = 0 } = req.query;
+    
+    const query = {};
+    if (batchId) query.batchId = batchId;
+    if (participantId) query.participantId = participantId;
+
+    const features = await DREAMFeatures.find(query)
+      .limit(parseInt(limit))
+      .skip(parseInt(skip))
+      .sort({ processedAt: -1 });
+
+    const total = await DREAMFeatures.countDocuments(query);
+
+    res.json({
+      success: true,
+      features: features,
+      pagination: { total, skip: parseInt(skip), limit: parseInt(limit) }
+    });
+  } catch (error) {
+    console.error('[DREAM] GET /dream-features - Error:', error);
+    res.status(500).json({ error: 'Failed to fetch features', message: error.message });
+  }
+});
+
+router.get('/dream-features/:id', async (req, res) => {
+  try {
+    const feature = await DREAMFeatures.findById(req.params.id);
+    if (!feature) {
+      return res.status(404).json({ error: 'Feature not found' });
+    }
+    res.json({ success: true, feature: feature });
+  } catch (error) {
+    console.error('[DREAM] GET /dream-features/:id - Error:', error);
+    res.status(500).json({ error: 'Failed to fetch feature', message: error.message });
+  }
+});
+
+router.post('/dream-features/export/:batchId', async (req, res) => {
+  try {
+    const { batchId } = req.params;
+    const features = await DREAMFeatures.find({ batchId: batchId });
+
+    if (features.length === 0) {
+      return res.status(404).json({ error: 'No features found for this batch' });
+    }
+
+    const csv = require('csv-stringify/sync');
+    const stringifier = csv.stringify;
+
+    const headers = [
+      'Participant_ID', 'Session_Date', 'Average_Joint_Velocity', 
+      'Total_Displacement_Ratio', 'Head_Gaze_Variance', 'Eye_Gaze_Consistency',
+      'ADOS_Communication_Score', 'ADOS_Total_Score', 'Age_Months', 'Therapy_Condition'
+    ];
+
+    const records = features.map(f => [
+      f.participantId,
+      f.sessionDate,
+      f.averageJointVelocity,
+      f.totalDisplacementRatio,
+      f.headGazeVariance,
+      f.eyeGazeConsistency,
+      f.adosCommunicationScore,
+      f.adosTotalScore,
+      f.ageMonths,
+      f.therapyCondition
+    ]);
+
+    const csvContent = stringifier([headers, ...records]);
+
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="dream_features_${batchId}.csv"`);
+    res.send(csvContent);
+
+  } catch (error) {
+    console.error('[DREAM] Export error:', error);
+    res.status(500).json({ error: 'Export failed', message: error.message });
+  }
+});
+
+// Patient Progress Tracking - Historical Data with Predictions
+router.get('/patient-progress/:patientId', requireResourceAccess('children'), async (req, res) => {
+  try {
+    const { patientId } = req.params;
+    const { metric = 'gaze' } = req.query;
+
+    const patient = await Patient.findOne({
+      _id: patientId,
+      therapist_user_id: req.user.id
+    });
+
+    if (!patient) {
+      return res.status(403).json({ message: 'Access denied. Patient not found.' });
+    }
+
+    const dreamFeatures = await DREAMFeatures.find({
+      participantId: patient.patient_id || patientId
+    }).sort({ processedAt: 1 }).limit(12);
+
+    if (dreamFeatures.length === 0) {
+      return res.json({
+        historicalData: [],
+        prediction: [],
+        message: 'No DREAM dataset sessions available for this patient'
+      });
+    }
+
+    const historicalData = dreamFeatures.map((feature, idx) => ({
+      sessionNumber: idx + 1,
+      sessionDate: feature.sessionDate || feature.processedAt,
+      score: metric === 'gaze' 
+        ? (100 - (feature.headGazeVariance || 0) * 100)
+        : (feature.averageJointVelocity || 0) * 100,
+      rawValue: metric === 'gaze' ? feature.headGazeVariance : feature.averageJointVelocity
+    }));
+
+    const recentData = historicalData.slice(-3);
+    const avgScore = recentData.reduce((sum, d) => sum + d.score, 0) / recentData.length;
+    const trend = historicalData.length > 1 
+      ? ((historicalData[historicalData.length - 1].score - historicalData[0].score) / historicalData.length)
+      : 0;
+
+    const predictionData = [];
+    const baseDate = new Date(historicalData[historicalData.length - 1].sessionDate);
+    
+    for (let i = 1; i <= 8; i++) {
+      const forecastDate = new Date(baseDate);
+      forecastDate.setDate(forecastDate.getDate() + (i * 7));
+      
+      const predictedScore = Math.min(100, avgScore + (trend * i * 1.5));
+      
+      predictionData.push({
+        forecastWeek: i,
+        forecastDate: forecastDate,
+        score: Math.max(0, Math.min(100, predictedScore)),
+        confidence: Math.max(60, 95 - (i * 3))
+      });
+    }
+
+    res.json({
+      historicalData,
+      prediction: predictionData,
+      summary: {
+        totalSessions: historicalData.length,
+        currentScore: historicalData[historicalData.length - 1].score,
+        trend: trend > 0 ? 'Improving' : trend < 0 ? 'Declining' : 'Stable',
+        projectedImprovement: predictionData[predictionData.length - 1].score - historicalData[historicalData.length - 1].score
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching patient progress:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// Behavioral Metrics - Latest Session Analysis
+router.get('/behavioral-metrics/:patientId', requireResourceAccess('children'), async (req, res) => {
+  try {
+    const { patientId } = req.params;
+    const { sessionId } = req.query;
+
+    const patient = await Patient.findOne({
+      _id: patientId,
+      therapist_user_id: req.user.id
+    });
+
+    if (!patient) {
+      return res.status(403).json({ message: 'Access denied. Patient not found.' });
+    }
+
+    let dreamFeature;
+    
+    if (sessionId) {
+      dreamFeature = await DREAMFeatures.findById(sessionId);
+    } else {
+      dreamFeature = await DREAMFeatures.findOne({
+        participantId: patient.patient_id || patientId
+      }).sort({ processedAt: -1 });
+    }
+
+    if (!dreamFeature) {
+      return res.json({
+        sessionDate: new Date().toISOString().split('T')[0],
+        averageJointVelocity: 0,
+        headGazeVariance: 0,
+        totalDisplacementRatio: 0,
+        adosCommunicationScore: 0,
+        adosTotalScore: 0,
+        message: 'No DREAM dataset session available for this patient'
+      });
+    }
+
+    res.json({
+      sessionDate: dreamFeature.sessionDate || dreamFeature.processedAt,
+      averageJointVelocity: dreamFeature.averageJointVelocity || 0,
+      headGazeVariance: dreamFeature.headGazeVariance || 0,
+      totalDisplacementRatio: dreamFeature.totalDisplacementRatio || 0,
+      eyeGazeConsistency: dreamFeature.eyeGazeConsistency || 0,
+      adosCommunicationScore: dreamFeature.adosCommunicationScore || 0,
+      adosTotalScore: dreamFeature.adosTotalScore || 0,
+      ageMonths: dreamFeature.ageMonths || 0,
+      therapyCondition: dreamFeature.therapyCondition || 'Unknown',
+      participantId: dreamFeature.participantId
+    });
+  } catch (error) {
+    console.error('Error fetching behavioral metrics:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// Create a report for a student (Therapist version)
+router.post('/reports', async (req, res) => {
+  try {
+    const { patientId, title, status } = req.body;
+    
+    // Verify the student exists and is accessible by this therapist
+    const student = await Patient.findById(patientId);
+    
+    if (!student) {
+      return res.status(404).json({ message: 'Student not found.' });
+    }
+
+    const reportData = {
+      patientId,
+      title: title || `Gaze Analysis Report - ${student.name}`,
+      status: status || 'final',
+      teacherId: req.user.id // We use teacherId field as defined in the model, but it stores the creator ID
+    };
+    
+    const report = new Report(reportData);
+    await report.save();
+    res.status(201).json(report);
+  } catch (error) {
+    console.error('Error creating report:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Complete Session - Mark Appointment as Completed with Notes
+router.post('/appointments/complete-session', requireResourceAccess('appointments'), async (req, res) => {
+  try {
+    const { appointmentId, status = 'completed', clinicalNotes } = req.body;
+
+    if (!appointmentId) {
+      return res.status(400).json({ message: 'Appointment ID is required' });
+    }
+
+    const appointment = await Appointment.findOne({
+      _id: appointmentId,
+      therapistId: req.user.id
+    }).populate('childId', 'name').populate('parentId', 'username email');
+
+    if (!appointment) {
+      return res.status(404).json({ message: 'Appointment not found or access denied' });
+    }
+
+    appointment.status = status;
+    if (clinicalNotes) {
+      appointment.notes = clinicalNotes;
+    }
+
+    await appointment.save();
+
+    res.json({
+      success: true,
+      message: 'Session completed successfully',
+      appointment: formatAppointmentResponse(appointment)
+    });
+  } catch (error) {
+    console.error('Error completing session:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// ==============================================
+// Patient Assignment System
+// ==============================================
+
+// Convert Guest Session to Patient
+router.post('/convert-guest-to-patient', async (req, res) => {
+  try {
+    const { guestSessionId, patientName, patientAge, patientGender, additionalInfo } = req.body;
+
+    if (!guestSessionId) {
+      return res.status(400).json({ message: 'Guest session ID is required' });
+    }
+
+    // Find the guest session
+    const guestSession = await GazeSession.findById(guestSessionId);
+    if (!guestSession) {
+      return res.status(404).json({ message: 'Guest session not found' });
+    }
+
+    if (!guestSession.isGuest) {
+      return res.status(400).json({ message: 'This is not a guest session' });
+    }
+
+    // Check if patient already exists with this email
+    const existingParent = await User.findOne({ email: guestSession.guestInfo.email });
+    let parentId;
+
+    if (existingParent) {
+      parentId = existingParent._id;
+      console.log(`✅ Found existing parent: ${existingParent.email}`);
+    } else {
+      // Create a placeholder parent account
+      const newParent = new User({
+        username: guestSession.guestInfo.parentName || 'Parent',
+        email: guestSession.guestInfo.email,
+        role: 'parent',
+        status: 'approved',
+        isActive: true
+      });
+      await newParent.save();
+      parentId = newParent._id;
+      console.log(`✅ Created new parent account: ${guestSession.guestInfo.email}`);
+    }
+
+    // Create patient profile
+    const newPatient = new Patient({
+      name: patientName || guestSession.guestInfo.childName,
+      age: patientAge || 0,
+      gender: patientGender || 'Not specified',
+      medical_history: additionalInfo || '',
+      parent_id: parentId,
+      therapist_user_id: req.user.id, // Assign to current therapist
+      screeningStatus: 'in-progress',
+      reportStatus: 'pending'
+    });
+
+    await newPatient.save();
+    console.log(`✅ Created patient: ${newPatient.name}`);
+
+    // Link guest session to patient
+    guestSession.patientId = newPatient._id;
+    guestSession.therapistId = req.user.id;
+    guestSession.isGuest = false;
+    guestSession.sessionType = 'authenticated';
+    await guestSession.save();
+
+    // Find and link all other guest sessions with same email
+    const otherGuestSessions = await GazeSession.find({
+      'guestInfo.email': guestSession.guestInfo.email,
+      isGuest: true,
+      _id: { $ne: guestSessionId }
+    });
+
+    for (const session of otherGuestSessions) {
+      session.patientId = newPatient._id;
+      session.therapistId = req.user.id;
+      session.isGuest = false;
+      session.sessionType = 'authenticated';
+      await session.save();
+    }
+
+    console.log(`✅ Linked ${otherGuestSessions.length} additional guest sessions to patient`);
+
+    res.json({
+      success: true,
+      message: 'Guest successfully converted to patient',
+      patient: newPatient,
+      linkedSessions: otherGuestSessions.length + 1
+    });
+
+  } catch (error) {
+    console.error('❌ Error converting guest to patient:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// Add Patient Manually
+router.post('/add-patient', async (req, res) => {
+  try {
+    const { 
+      patientName, 
+      patientAge, 
+      patientGender, 
+      medicalHistory,
+      parentName,
+      parentEmail,
+      linkToGuestEmail // Optional: link to existing guest sessions
+    } = req.body;
+
+    if (!patientName || !patientAge || !patientGender || !parentEmail) {
+      return res.status(400).json({ 
+        message: 'Patient name, age, gender, and parent email are required' 
+      });
+    }
+
+    // Check if parent exists or create new
+    let parent = await User.findOne({ email: parentEmail });
+    
+    if (!parent) {
+      parent = new User({
+        username: parentName || 'Parent',
+        email: parentEmail,
+        role: 'parent',
+        status: 'approved',
+        isActive: true
+      });
+      await parent.save();
+      console.log(`✅ Created new parent: ${parentEmail}`);
+    }
+
+    // Create patient
+    const newPatient = new Patient({
+      name: patientName,
+      age: patientAge,
+      gender: patientGender,
+      medical_history: medicalHistory || '',
+      parent_id: parent._id,
+      therapist_user_id: req.user.id,
+      screeningStatus: 'pending',
+      reportStatus: 'pending'
+    });
+
+    await newPatient.save();
+    console.log(`✅ Patient created: ${newPatient.name}`);
+
+    // If linkToGuestEmail is provided, link all guest sessions with that email
+    if (linkToGuestEmail) {
+      const guestSessions = await GazeSession.find({
+        'guestInfo.email': linkToGuestEmail,
+        isGuest: true
+      });
+
+      for (const session of guestSessions) {
+        session.patientId = newPatient._id;
+        session.therapistId = req.user.id;
+        session.isGuest = false;
+        session.sessionType = 'authenticated';
+        await session.save();
+      }
+
+      console.log(`✅ Linked ${guestSessions.length} guest sessions to patient`);
+
+      return res.json({
+        success: true,
+        message: 'Patient added successfully',
+        patient: newPatient,
+        linkedSessions: guestSessions.length
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'Patient added successfully',
+      patient: newPatient
+    });
+
+  } catch (error) {
+    console.error('❌ Error adding patient:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// Search Guest Sessions by Email
+router.get('/search-guest-sessions', async (req, res) => {
+  try {
+    const { email } = req.query;
+
+    if (!email) {
+      return res.status(400).json({ message: 'Email parameter is required' });
+    }
+
+    const guestSessions = await GazeSession.find({
+      'guestInfo.email': email,
+      isGuest: true
+    }).sort({ createdAt: -1 }).limit(50);
+
+    res.json({
+      success: true,
+      sessions: guestSessions,
+      count: guestSessions.length
+    });
+
+  } catch (error) {
+    console.error('❌ Error searching guest sessions:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// Get All Guest Sessions for Review
+router.get('/guest-sessions', async (req, res) => {
+  try {
+    const guestSessions = await GazeSession.find({
+      isGuest: true,
+      status: { $in: ['completed', 'pending_review'] }
+    })
+    .sort({ createdAt: -1 })
+    .limit(100)
+    .lean();
+
+    // Group by email
+    const sessionsByEmail = guestSessions.reduce((acc, session) => {
+      const email = session.guestInfo?.email;
+      if (email) {
+        if (!acc[email]) {
+          acc[email] = {
+            email,
+            parentName: session.guestInfo?.parentName,
+            childName: session.guestInfo?.childName,
+            sessions: []
+          };
+        }
+        acc[email].sessions.push(session);
+      }
+      return acc;
+    }, {});
+
+    res.json({
+      success: true,
+      guestGroups: Object.values(sessionsByEmail)
+    });
+
+  } catch (error) {
+    console.error('❌ Error fetching guest sessions:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
 

@@ -27,7 +27,7 @@ const normalizeRiskLevel = (value) => {
   const input = typeof value === 'string' ? value : '';
   const lower = input.toLowerCase();
   if (lower === 'high') return 'High';
-  if (lower === 'medium') return 'Medium';
+  if (lower === 'medium' || lower === 'moderate') return 'Medium';
   return 'Low';
 };
 const fallbackScreeningTemplates = [
@@ -80,9 +80,12 @@ router.get('/class-stats', async (req, res) => {
     
     const stats = {
       totalStudents: students.length,
-      studentsAtRisk: students.filter(s => s.riskLevel === 'high').length,
-      pendingScreenings: students.filter(s => s.screeningStatus === 'pending').length,
-      completedReports: students.filter(s => s.reportStatus === 'completed').length
+      studentsAtRisk: students.filter(s => {
+        const risk = normalizeRiskLevel(s.riskLevel);
+        return risk === 'High' || risk === 'Medium';
+      }).length,
+      pendingScreenings: students.filter(s => (s.screeningStatus || '').toLowerCase() === 'pending').length,
+      completedReports: students.filter(s => (s.reportStatus || '').toLowerCase() === 'completed').length
     };
     
     res.json(stats);
@@ -96,7 +99,7 @@ router.get('/pending-screenings', async (req, res) => {
   try {
     const students = await Patient.find({ 
       assignedTeacherId: req.user.id,
-      screeningStatus: 'pending'
+      screeningStatus: { $regex: /^pending$/i }
     });
     
     const pendingScreenings = students.map(student => ({
@@ -168,7 +171,7 @@ router.get('/screenings', async (req, res) => {
         'in-progress': 'In Progress',
         pending: 'Pending'
       };
-      const status = statusMap[student.screeningStatus] || 'Pending';
+      const status = statusMap[(student.screeningStatus || '').toLowerCase()] || 'Pending';
       const riskLevel = normalizeRiskLevel(student.riskLevel);
       const scoreMap = {
         Low: 92,
@@ -214,6 +217,19 @@ router.get('/reports', requireResourceAccess('reports'), async (req, res) => {
   }
 });
 
+// Get reports for a specific student
+router.get('/reports/student/:studentId', requireResourceAccess('reports'), async (req, res) => {
+  try {
+    const reports = await Report.find({ 
+      teacherId: req.user.id,
+      patientId: req.params.studentId 
+    }).sort({ createdAt: -1 });
+    res.json(reports);
+  } catch (error) {
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
 // Create a report for a student
 router.post('/reports', async (req, res) => {
   try {
@@ -230,8 +246,7 @@ router.post('/reports', async (req, res) => {
     const reportData = {
       ...req.body,
       teacherId: req.user.id,
-      studentId: req.body.studentId,
-      studentName: student.name
+      patientId: req.body.studentId,
     };
     
     const report = new Report(reportData);
@@ -253,9 +268,9 @@ router.get('/insights', async (req, res) => {
         averageAge: students.reduce((sum, s) => sum + s.age, 0) / students.length,
         commonConcerns: ['Speech delay', 'Social interaction', 'Behavioral issues'],
         riskDistribution: {
-          low: students.filter(s => s.riskLevel === 'low').length,
-          medium: students.filter(s => s.riskLevel === 'medium').length,
-          high: students.filter(s => s.riskLevel === 'high').length
+          low: students.filter(s => normalizeRiskLevel(s.riskLevel) === 'Low').length,
+          medium: students.filter(s => normalizeRiskLevel(s.riskLevel) === 'Medium').length,
+          high: students.filter(s => normalizeRiskLevel(s.riskLevel) === 'High').length
         }
       },
       recommendations: [

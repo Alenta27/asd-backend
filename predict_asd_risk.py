@@ -74,22 +74,22 @@ def predict_asd_risk_heuristic(features_dict):
         risk_score += 1.5
     
     low_prob = 0
-    moderate_prob = 0
+    medium_prob = 0
     high_prob = 0
     
     if risk_score < 1.5:
         low_prob = 75
-        moderate_prob = 20
+        medium_prob = 20
         high_prob = 5
         risk_level = 'Low'
     elif risk_score < 4.0:
         low_prob = 25
-        moderate_prob = 60
+        medium_prob = 60
         high_prob = 15
-        risk_level = 'Moderate'
+        risk_level = 'Medium'
     else:
         low_prob = 10
-        moderate_prob = 25
+        medium_prob = 25
         high_prob = 65
         risk_level = 'High'
     
@@ -97,7 +97,7 @@ def predict_asd_risk_heuristic(features_dict):
         "risk": risk_level,
         "probability": {
             "Low": low_prob,
-            "Moderate": moderate_prob,
+            "Medium": medium_prob,
             "High": high_prob
         },
         "score": high_prob
@@ -184,7 +184,7 @@ def predict_asd_risk(features_dict):
                 if 'high' in cls_str:
                     prob_dict['High'] = float(probabilities[i]) * 100
                 elif 'medium' in cls_str or 'moderate' in cls_str:
-                    prob_dict['Moderate'] = float(probabilities[i]) * 100
+                    prob_dict['Medium'] = float(probabilities[i]) * 100
                 elif 'low' in cls_str:
                     prob_dict['Low'] = float(probabilities[i]) * 100
                 else:
@@ -196,7 +196,7 @@ def predict_asd_risk(features_dict):
             if 'high' in pred_str:
                 risk_level = 'High'
             elif 'medium' in pred_str or 'moderate' in pred_str:
-                risk_level = 'Moderate'
+                risk_level = 'Medium'
             elif 'low' in pred_str:
                 risk_level = 'Low'
             else:

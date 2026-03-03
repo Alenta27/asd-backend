@@ -12,12 +12,6 @@ const Report = require('../models/report');
 const Appointment = require('../models/appointment');
 const Slot = require('../models/slot');
 
-// Initialize Razorpay instance
-const razorpay = new Razorpay({
-  key_id: process.env.RAZORPAY_KEY_ID || 'rzp_test_RGXWGOBliVCIpU',
-  key_secret: process.env.RAZORPAY_KEY_SECRET || '9Q49llzcN0kLD3021OoSstOp'
-});
-
 // Get available slots (no auth required for testing)
 router.get('/available-slots-public', async (req, res) => {
   try {
@@ -605,119 +599,38 @@ router.post('/predict-survey', verifyToken, async (req, res) => {
 
 // ============== PAYMENT ROUTES ==============
 
-// Create payment order (Razorpay)
+// Create payment order (Dummy)
 router.post('/create-payment-order', verifyToken, async (req, res) => {
   try {
     const { childId, therapistId: therapistIdentifier, appointmentDate, appointmentTime, reason, appointmentFee } = req.body;
     const normalizedTherapistIdentifier = typeof therapistIdentifier === 'string' ? therapistIdentifier.trim() : therapistIdentifier;
     
     console.log('POST /create-payment-order - Request body:', req.body);
-    console.log('POST /create-payment-order - User ID:', req.user.id);
 
     if (!childId || !normalizedTherapistIdentifier || !appointmentDate || !appointmentTime) {
-      console.log('POST /create-payment-order - Missing required fields');
       return res.status(400).json({ message: 'Missing required fields' });
     }
 
     // Verify the child belongs to this parent
-    const child = await Patient.findOne({ 
-      _id: childId, 
-      parent_id: req.user.id 
-    });
-    
-    console.log('POST /create-payment-order - Found child:', child);
-    
+    const child = await Patient.findOne({ _id: childId, parent_id: req.user.id });
     if (!child) {
       return res.status(403).json({ message: 'Access denied. Child not found or not yours.' });
     }
 
-    // Verify therapist exists and is active
-    let therapist = null;
-
-    if (normalizedTherapistIdentifier && mongoose.Types.ObjectId.isValid(normalizedTherapistIdentifier)) {
-      therapist = await User.findOne({
-        _id: normalizedTherapistIdentifier,
-        role: 'therapist',
-        $and: [
-          {
-            $or: [
-              { status: 'approved' },
-              { status: 'Active' },
-              { status: 'active' },
-              { status: { $exists: false } },
-              { status: null }
-            ]
-          },
-          {
-            $or: [
-              { isActive: { $ne: false } },
-              { isActive: { $exists: false } },
-              { isActive: null }
-            ]
-          }
-        ]
-      });
+    // Verify therapist exists
+    let therapist = await User.findOne({ _id: normalizedTherapistIdentifier, role: 'therapist' });
+    if (!therapist) {
+      therapist = await User.findOne({ email: normalizedTherapistIdentifier, role: 'therapist' });
     }
-
-    if (!therapist && normalizedTherapistIdentifier) {
-      therapist = await User.findOne({
-        $and: [
-          {
-            $or: [
-              { email: normalizedTherapistIdentifier },
-              { username: normalizedTherapistIdentifier }
-            ]
-          },
-          {
-            role: 'therapist',
-            $and: [
-              {
-                $or: [
-                  { status: 'approved' },
-                  { status: 'Active' },
-                  { status: 'active' },
-                  { status: { $exists: false } },
-                  { status: null }
-                ]
-              },
-              {
-                $or: [
-                  { isActive: { $ne: false } },
-                  { isActive: { $exists: false } },
-                  { isActive: null }
-                ]
-              }
-            ]
-          }
-        ]
-      });
-    }
-
-    console.log('POST /create-payment-order - Found therapist:', therapist);
 
     if (!therapist) {
       return res.status(404).json({ message: 'Therapist not found or not available.' });
     }
 
-    // Parse appointment date (YYYY-MM-DD) as local date, not UTC
     const [year, month, day] = appointmentDate.split('-').map(Number);
     const appointmentDateObj = new Date(year, month - 1, day, 0, 0, 0, 0);
 
-    // Check if slot is available for this date and therapist
-    const slot = await Slot.findOne({
-      therapistId: therapist._id,
-      date: {
-        $gte: new Date(year, month - 1, day, 0, 0, 0, 0),
-        $lte: new Date(year, month - 1, day, 23, 59, 59, 999)
-      },
-      isActive: true
-    });
-
-    if (!slot) {
-      return res.status(400).json({ message: 'Therapist slot is not available for this date' });
-    }
-
-    // Create temporary appointment without payment
+    // Create temporary appointment
     const tempAppointment = new Appointment({
       parentId: req.user.id,
       childId,
@@ -727,39 +640,16 @@ router.post('/create-payment-order', verifyToken, async (req, res) => {
       reason,
       status: 'pending',
       paymentStatus: 'initiated',
-      appointmentFee: appointmentFee || 500 // Default fee in rupees
+      appointmentFee: appointmentFee || 500
     });
 
     await tempAppointment.save();
 
-    // Create Razorpay order
-    const options = {
-      amount: (appointmentFee || 500) * 100, // Razorpay expects amount in paise
-      currency: 'INR',
-      receipt: `appt_${tempAppointment._id}`,
-      notes: {
-        appointmentId: tempAppointment._id.toString(),
-        childId,
-        therapistId: therapist._id.toString(),
-        parentId: req.user.id.toString()
-      }
-    };
-
-    console.log('Creating Razorpay order with options:', options);
-
-    const order = await razorpay.orders.create(options);
-
-    console.log('Razorpay order created:', order);
-
-    // Update appointment with order details
-    tempAppointment.razorpayOrderId = order.id;
-    await tempAppointment.save();
-
     res.json({
-      orderId: order.id,
+      orderId: `order_dummy_${Date.now()}`,
       appointmentId: tempAppointment._id,
       amount: appointmentFee || 500,
-      keyId: process.env.RAZORPAY_KEY_ID || 'rzp_test_RGXWGOBliVCIpU',
+      keyId: 'dummy_key',
       therapistName: therapist.username,
       childName: child.name,
       appointmentDate,
@@ -774,54 +664,26 @@ router.post('/create-payment-order', verifyToken, async (req, res) => {
 // Verify payment and confirm appointment
 router.post('/verify-payment', verifyToken, async (req, res) => {
   try {
-    const { appointmentId, razorpayOrderId, razorpayPaymentId, razorpaySignature } = req.body;
+    const { appointmentId } = req.body;
 
-    console.log('POST /verify-payment - Request body:', req.body);
-
-    if (!appointmentId || !razorpayOrderId || !razorpayPaymentId || !razorpaySignature) {
-      return res.status(400).json({ message: 'Missing required payment fields' });
+    if (!appointmentId) {
+      return res.status(400).json({ message: 'Missing appointment ID' });
     }
 
-    // Find appointment
-    const appointment = await Appointment.findOne({
-      _id: appointmentId,
-      parentId: req.user.id
-    });
-
+    const appointment = await Appointment.findOne({ _id: appointmentId, parentId: req.user.id });
     if (!appointment) {
       return res.status(404).json({ message: 'Appointment not found.' });
     }
 
-    // Verify Razorpay signature
-    const generated_signature = crypto
-      .createHmac('sha256', process.env.RAZORPAY_KEY_SECRET || '9Q49llzcN0kLD3021OoSstOp')
-      .update(`${razorpayOrderId}|${razorpayPaymentId}`)
-      .digest('hex');
-
-    console.log('Payment verification:', {
-      providedSignature: razorpaySignature,
-      generatedSignature: generated_signature,
-      match: generated_signature === razorpaySignature
-    });
-
-    if (generated_signature !== razorpaySignature) {
-      appointment.paymentStatus = 'failed';
-      await appointment.save();
-      return res.status(400).json({ message: 'Payment verification failed' });
-    }
-
-    // Payment verified successfully
+    // Dummy payment always succeeds
     appointment.paymentStatus = 'completed';
-    appointment.razorpayPaymentId = razorpayPaymentId;
-    appointment.razorpaySignature = razorpaySignature;
+    appointment.razorpayPaymentId = `pay_dummy_${Date.now()}`;
     appointment.paymentDate = new Date();
-    appointment.status = 'confirmed'; // Auto-confirm after payment
+    appointment.status = 'confirmed';
     
     await appointment.save();
     await appointment.populate('childId', 'name');
     await appointment.populate('therapistId', 'username email');
-
-    console.log('Payment verified and appointment confirmed:', appointment);
 
     res.json({
       message: 'Payment verified successfully. Appointment confirmed!',
